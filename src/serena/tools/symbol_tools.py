@@ -3,11 +3,13 @@ Language server-related tools
 """
 
 import dataclasses
+import logging
 import os
 from collections.abc import Sequence
 from copy import copy
-from typing import Any
+from typing import Any, Optional
 
+from serena.lineage.recorder import get_active_task, record_change
 from serena.tools import (
     SUCCESS_RESULT,
     Tool,
@@ -16,6 +18,8 @@ from serena.tools import (
 )
 from serena.tools.tools_base import ToolMarkerOptional
 from solidlsp.ls_types import SymbolKind
+
+log = logging.getLogger(__name__)
 
 
 def _sanitize_symbol_dict(symbol_dict: dict[str, Any]) -> dict[str, Any]:
@@ -32,6 +36,52 @@ def _sanitize_symbol_dict(symbol_dict: dict[str, Any]) -> dict[str, Any]:
     # also remove name, name_path should be enough
     symbol_dict.pop("name")
     return symbol_dict
+
+
+def _record_to_lineage(
+    task_id: Optional[str],
+    file_path: str,
+    change_type: str,
+    tool_used: str,
+    symbol_fqn: Optional[str] = None,
+    old_content: Optional[str] = None,
+    new_content: Optional[str] = None,
+) -> None:
+    """
+    Helper to record changes to lineage database.
+
+    If task_id is not provided, attempts to get active task from phase_state.
+    If no task context is available, silently skips recording (graceful degradation).
+
+    Args:
+        task_id: Optional Spectrena task ID
+        file_path: Relative path to modified file
+        change_type: Type of change (modify, create, delete, rename)
+        tool_used: Name of Serena tool used
+        symbol_fqn: Optional fully qualified symbol name
+        old_content: Optional content before change
+        new_content: Optional content after change
+
+    """
+    effective_task_id = task_id
+    if not effective_task_id:
+        active = get_active_task()
+        effective_task_id = active.get("current_task_id") if active else None
+
+    if effective_task_id:
+        change_id = record_change(
+            task_id=effective_task_id,
+            file_path=file_path,
+            change_type=change_type,
+            tool_used=tool_used,
+            symbol_fqn=symbol_fqn,
+            old_content=old_content,
+            new_content=new_content,
+        )
+        if change_id:
+            log.info(f"Recorded change {change_id} for task {effective_task_id}")
+    else:
+        log.debug("No task context available, skipping lineage recording")
 
 
 class RestartLanguageServerTool(Tool, ToolMarkerOptional):
@@ -211,6 +261,7 @@ class ReplaceSymbolBodyTool(Tool, ToolMarkerSymbolicEdit):
         name_path: str,
         relative_path: str,
         body: str,
+        task_id: Optional[str] = None,
     ) -> str:
         r"""
         Replaces the body of the symbol with the given `name_path`.
@@ -224,13 +275,37 @@ class ReplaceSymbolBodyTool(Tool, ToolMarkerSymbolicEdit):
         :param body: the new symbol body. The symbol body is the definition of a symbol
             in the programming language, including e.g. the signature line for functions.
             IMPORTANT: The body does NOT include any preceding docstrings/comments or imports, in particular.
+        :param task_id: Optional Spectrena task ID for lineage tracking.
+            If not provided, uses active task from phase_state.
         """
+        # Get old content before replacement for lineage tracking
+        symbol_retriever = self.create_language_server_symbol_retriever()
+        try:
+            symbols = symbol_retriever.find_by_name(name_path, within_relative_path=relative_path)
+            old_body = symbols[0].body if symbols and symbols[0].body else None
+        except Exception:
+            old_body = None
+
+        # Perform the replacement
         code_editor = self.create_code_editor()
         code_editor.replace_body(
             name_path,
             relative_file_path=relative_path,
             body=body,
         )
+
+        # Record to lineage database
+        symbol_fqn = f"{relative_path}:{name_path}"
+        _record_to_lineage(
+            task_id=task_id,
+            file_path=relative_path,
+            change_type="modify",
+            tool_used="replace_symbol_body",
+            symbol_fqn=symbol_fqn,
+            old_content=old_body,
+            new_content=body,
+        )
+
         return SUCCESS_RESULT
 
 
@@ -244,6 +319,7 @@ class InsertAfterSymbolTool(Tool, ToolMarkerSymbolicEdit):
         name_path: str,
         relative_path: str,
         body: str,
+        task_id: Optional[str] = None,
     ) -> str:
         """
         Inserts the given body/content after the end of the definition of the given symbol (via the symbol's location).
@@ -253,9 +329,25 @@ class InsertAfterSymbolTool(Tool, ToolMarkerSymbolicEdit):
         :param relative_path: the relative path to the file containing the symbol
         :param body: the body/content to be inserted. The inserted code shall begin with the next line after
             the symbol.
+        :param task_id: Optional Spectrena task ID for lineage tracking.
+            If not provided, uses active task from phase_state.
         """
+        # Perform the insertion
         code_editor = self.create_code_editor()
         code_editor.insert_after_symbol(name_path, relative_file_path=relative_path, body=body)
+
+        # Record to lineage database
+        symbol_fqn = f"{relative_path}:{name_path}"
+        _record_to_lineage(
+            task_id=task_id,
+            file_path=relative_path,
+            change_type="create",
+            tool_used="insert_after_symbol",
+            symbol_fqn=symbol_fqn,
+            old_content=None,
+            new_content=body,
+        )
+
         return SUCCESS_RESULT
 
 
@@ -269,6 +361,7 @@ class InsertBeforeSymbolTool(Tool, ToolMarkerSymbolicEdit):
         name_path: str,
         relative_path: str,
         body: str,
+        task_id: Optional[str] = None,
     ) -> str:
         """
         Inserts the given content before the beginning of the definition of the given symbol (via the symbol's location).
@@ -278,9 +371,25 @@ class InsertBeforeSymbolTool(Tool, ToolMarkerSymbolicEdit):
         :param name_path: name path of the symbol before which to insert content (definitions in the `find_symbol` tool apply)
         :param relative_path: the relative path to the file containing the symbol
         :param body: the body/content to be inserted before the line in which the referenced symbol is defined
+        :param task_id: Optional Spectrena task ID for lineage tracking.
+            If not provided, uses active task from phase_state.
         """
+        # Perform the insertion
         code_editor = self.create_code_editor()
         code_editor.insert_before_symbol(name_path, relative_file_path=relative_path, body=body)
+
+        # Record to lineage database
+        symbol_fqn = f"{relative_path}:{name_path}"
+        _record_to_lineage(
+            task_id=task_id,
+            file_path=relative_path,
+            change_type="create",
+            tool_used="insert_before_symbol",
+            symbol_fqn=symbol_fqn,
+            old_content=None,
+            new_content=body,
+        )
+
         return SUCCESS_RESULT
 
 
@@ -294,6 +403,7 @@ class RenameSymbolTool(Tool, ToolMarkerSymbolicEdit):
         name_path: str,
         relative_path: str,
         new_name: str,
+        task_id: Optional[str] = None,
     ) -> str:
         """
         Renames the symbol with the given `name_path` to `new_name` throughout the entire codebase.
@@ -303,8 +413,27 @@ class RenameSymbolTool(Tool, ToolMarkerSymbolicEdit):
         :param name_path: name path of the symbol to rename (definitions in the `find_symbol` tool apply)
         :param relative_path: the relative path to the file containing the symbol to rename
         :param new_name: the new name for the symbol
+        :param task_id: Optional Spectrena task ID for lineage tracking.
+            If not provided, uses active task from phase_state.
         :return: result summary indicating success or failure
         """
+        # Extract old name from name_path (last component)
+        old_name = name_path.split("/")[-1]
+
+        # Perform the rename
         code_editor = self.create_code_editor()
         status_message = code_editor.rename_symbol(name_path, relative_file_path=relative_path, new_name=new_name)
+
+        # Record to lineage database
+        symbol_fqn = f"{relative_path}:{name_path}"
+        _record_to_lineage(
+            task_id=task_id,
+            file_path=relative_path,
+            change_type="rename",
+            tool_used="rename_symbol",
+            symbol_fqn=symbol_fqn,
+            old_content=old_name,
+            new_content=new_name,
+        )
+
         return status_message

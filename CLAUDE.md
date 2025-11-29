@@ -104,6 +104,80 @@ Configuration is loaded from (in order of precedence):
 - **MCP protocol** - Exposes tools to AI agents via Model Context Protocol
 - **Async operation** - Non-blocking language server interactions
 
+## Spectrena Lineage Integration
+
+This Serena fork includes automatic lineage tracking for Spectrena projects. When Serena is used in a project with Spectrena lineage enabled, all code edits are automatically recorded with task context.
+
+### How It Works
+
+**Dual MCP Server Architecture:**
+```
+Claude Code
+    │
+    ├──► spectrena-mcp (task_start, task_complete, ready_specs)
+    │           │
+    │           ▼
+    │    ┌─────────────────┐
+    └──► │ .spectrena/     │ ◄── serena-mcp (replace_symbol, insert_after)
+         │ lineage         │         │
+         └─────────────────┘         │
+                                     │
+         (Serena auto-records edits with active task context)
+```
+
+### Modified Tools
+
+All symbolic editing tools now support optional `task_id` parameter and automatic lineage recording:
+
+- `replace_symbol_body(name_path, relative_path, body, task_id=None)` - Records symbol modifications
+- `insert_after_symbol(name_path, relative_path, body, task_id=None)` - Records insertions
+- `insert_before_symbol(name_path, relative_path, body, task_id=None)` - Records insertions
+- `rename_symbol(name_path, relative_path, new_name, task_id=None)` - Records renames
+
+**Behavior:**
+- If `task_id` is provided explicitly, uses that task ID
+- If `task_id` is None, automatically retrieves active task from `.spectrena/lineage` database
+- If no task context is available, edits proceed normally without recording (graceful degradation)
+- All recording is logged for debugging
+
+### Lineage Database Detection
+
+The lineage recorder searches upward from the current directory for:
+- `.spectrena/lineage.db` (SQLite backend)
+- `.spectrena/lineage/` (SurrealDB embedded backend)
+
+If no database is found, Serena operates normally without lineage tracking.
+
+### Recorded Information
+
+Each code change records:
+- **task_id**: Spectrena task identifier (e.g., "CORE-001-T01")
+- **file_path**: Relative path to modified file
+- **symbol_fqn**: Fully qualified symbol name (e.g., "src/auth.py:User.authenticate")
+- **change_type**: "modify", "create", "rename", or "delete"
+- **tool_used**: Serena tool name
+- **old_content_hash**: SHA-256 hash of content before edit (for diffing)
+- **new_content_hash**: SHA-256 hash of content after edit
+- **timestamp**: ISO-8601 timestamp
+
+### Benefits
+
+- **Full traceability**: Spec → task → code changes
+- **Impact analysis**: "What code was touched by task X?"
+- **Automatic**: No manual `record_change()` calls required
+- **Non-invasive**: Works with or without Spectrena
+- **Backward compatible**: Existing Serena workflows unchanged
+
+### Implementation Protocol
+
+When working on Spectrena-managed projects:
+
+1. **Before coding**: `task_start(task_id)` via spectrena-mcp to set context
+2. **Read spec**: Use `task_context(task_id)` for requirements
+3. **Find code**: Use Serena `find_symbol` to locate edit points
+4. **Edit code**: Use Serena edit tools (auto-tracked!)
+5. **Complete**: `task_complete(task_id, minutes)` via spectrena-mcp
+
 ## Working with the Codebase
 
 - Project uses Python 3.11 with `uv` for dependency management
