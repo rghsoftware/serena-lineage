@@ -3,10 +3,13 @@ build-backend = "hatchling.build"
 requires = ["hatchling"]
 
 [project]
-name = "serena-agent"
-version = "0.1.4"
+name = "serena-lineage"
+version = "0.1.0"
 description = ""
-authors = [{ name = "Oraios AI", email = "info@oraios-ai.de" }]
+authors = [
+  { name = "Oraios AI", email = "info@oraios-ai.de" },
+  { name = "Robert Hamilton", email = "robert@rghsoftware.com" },
+]
 readme = "README.md"
 requires-python = ">=3.11, <3.12"
 classifiers = [
@@ -77,7 +80,7 @@ agno = ["agno>=2.2.1", "sqlalchemy>=2.0.40"]
 google = ["google-genai>=1.8.0"]
 
 [project.urls]
-Homepage = "https://github.com/oraios/serena"
+Homepage = "https://github.com/rghsoftware/serena-lineage"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/serena", "src/interprompt", "src/solidlsp"]
